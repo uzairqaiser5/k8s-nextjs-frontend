@@ -1,13 +1,16 @@
-name: Deploy Backend to K8s
+name: Deploy Frontend to K8s
 
 on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
-  build-and-deploy:
+  build-and-push:
+    name: Build & Push Docker Image
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -18,25 +21,85 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build & Push Docker Image
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Frontend Image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/fastapi-backend:${{ github.sha }},${{ secrets.DOCKERHUB_USERNAME }}/fastapi-backend:latest
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/nextjs-frontend:${{ github.sha }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/nextjs-frontend:latest
 
-      - name: Deploy to K8s via Master Node SSH
+  deploy-to-k8s:
+    name: Deploy to Kubernetes Cluster via SSH
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Execute Deployment on Control Plane
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.K8S_MASTER_IP }}
           username: ${{ secrets.K8S_SSH_USER }}
           key: ${{ secrets.K8S_SSH_KEY }}
+          port: 22
           script: |
+            # Create deployment manifests directory if it does not exist
             mkdir -p ~/app-manifests
-            cat << 'EOF' > ~/app-manifests/backend.yaml
-            ${{ steps.manifest.outputs.content }}
+
+            # Ensure the target namespace exists
+            kubectl create namespace three-tier-app --dry-run=client -o yaml | kubectl apply -f -
+
+            # Write or update the Frontend manifest directly
+            cat << 'EOF' > ~/app-manifests/frontend.yaml
+            apiVersion: apps/v1
+            kind: Deployment
+            metadata:
+              name: nextjs-frontend
+              namespace: three-tier-app
+            spec:
+              replicas: 2
+              selector:
+                matchLabels:
+                  app: nextjs-frontend
+              template:
+                metadata:
+                  labels:
+                    app: nextjs-frontend
+                spec:
+                  containers:
+                    - name: frontend
+                      image: DOCKER_IMAGE_TAG
+                      imagePullPolicy: Always
+                      ports:
+                        - containerPort: 3000
+            ---
+            apiVersion: v1
+            kind: Service
+            metadata:
+              name: nextjs-service
+              namespace: three-tier-app
+            spec:
+              type: NodePort
+              ports:
+                - port: 3000
+                  targetPort: 3000
+                  nodePort: 30007
+              selector:
+                app: nextjs-frontend
             EOF
-            # Replace placeholder with new tag and apply
-            sed -i "s|DOCKER_IMAGE_PLACEHOLDER|${{ secrets.DOCKERHUB_USERNAME }}/fastapi-backend:${{ github.sha }}|g" ~/app-manifests/backend.yaml
-            kubectl apply -f ~/app-manifests/backend.yaml
-            kubectl rollout status deployment/fastapi-backend -n three-tier-app --timeout=120s
+
+            # Inject the exact image tag built in the previous job
+            sed -i "s|DOCKER_IMAGE_TAG|${{ secrets.DOCKERHUB_USERNAME }}/nextjs-frontend:${{ github.sha }}|g" ~/app-manifests/frontend.yaml
+
+            # Apply manifest to the cluster
+            kubectl apply -f ~/app-manifests/frontend.yaml
+
+            # Wait for rollout completion
+            kubectl rollout status deployment/nextjs-frontend -n three-tier-app --timeout=120s
