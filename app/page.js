@@ -40,7 +40,7 @@ export default function Home() {
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Enter message to store in Postgres..."
+          placeholder="Enter messages uzair to store in Postgres..."
           style={{ padding: '0.5rem', width: '300px' }}
         />
         <button type="submit" style={{ padding: '0.5rem 1rem', marginLeft: '0.5rem' }}>
